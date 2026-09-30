@@ -4,6 +4,12 @@ Keeps a Windows machine awake and, as a visual, slowly traces a chosen
 phrase in cursive with the mouse cursor. Runs until you cancel it (Ctrl+C)
 or it hits its own timeout.
 
+### Why "Hancock"?
+
+A "John Hancock" is American slang for a signature. This tool keeps your
+mouse busy to avoid your system from going asleep while long-running
+agents are working.
+
 ## Why this exists
 
 On a managed laptop where you can't touch the power settings, the obvious
