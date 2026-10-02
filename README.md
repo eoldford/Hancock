@@ -1,8 +1,10 @@
 # Hancock
 
-Keeps a Windows machine awake and, as a visual, slowly traces a chosen
-phrase in cursive with the mouse cursor. Runs until you cancel it (Ctrl+C)
-or it hits its own timeout.
+Keeps a Windows machine awake and, as a visual, moves the mouse cursor
+through a little game — cycling between tic-tac-toe, Connect Four, Pong,
+and Hangman playing themselves. Pass `--spell <text>` to trace that text
+in cursive instead. Runs until you cancel it (Ctrl+C) or it hits its own
+timeout.
 
 ### Why "Hancock"?
 
@@ -48,17 +50,20 @@ No other dependencies. Mouse/keyboard control and sleep prevention use
 python Hancock.py
 ```
 
-Defaults to tracing "Lorem Ipsum". Options:
+Defaults to cycling through tic-tac-toe, Connect Four, Pong, and Hangman,
+each playing out a scripted game against itself. Options:
 
 | Flag | Meaning | Default |
 |---|---|---|
-| `-s`, `--spell` | Text to trace in cursive | `"Lorem Ipsum"` |
+| `-s`, `--spell` | Text to trace in cursive instead of playing games | `None` (plays games) |
 | `-r`, `--resume-delay` | Seconds of no mouse movement or keystrokes before resuming after you interrupt it | `3.0` |
 | `-t`, `--timeout` | Stop automatically after this many hours | `2.0` |
+| `--version` | Print the version and exit | |
 
 Examples:
 
 ```bash
+python Hancock.py
 python Hancock.py -s "Evan P Oldford"
 python Hancock.py -s "Evan P Oldford" -r 5
 python Hancock.py -t 12
@@ -73,20 +78,32 @@ python Hancock.py -t 12
   then glides smoothly from wherever you left the cursor back onto the
   path at the exact point it paused, rather than jumping or resuming from
   the start.
-- **Randomized placement.** Each full pass through the text picks a new
-  random on-screen position (still fully within screen bounds), so the
-  trace doesn't sit over the same pixels for hours on end.
+- **Randomized placement.** Each full pass picks a new random on-screen
+  position (still fully within screen bounds), so the trace doesn't sit
+  over the same pixels for hours on end.
 - **Self-limiting.** Stops on its own after `--timeout` hours, or
   immediately on Ctrl+C. Either way it releases the sleep-prevention
   request on exit.
+
+## How the games are built
+
+Each game (`build_tic_tac_toe_path()`, `build_connect_four_path()`,
+`build_pong_path()`, `build_hangman_path()`) picks a scripted game at
+random from a fixed set and renders its board/moves as strokes — the grid
+or court lines, then the pieces, moves, or ball path in order, plus a
+winning line or hanged figure where applicable. Hangman's revealed-word
+outcome reuses the cursive font path below, rescaled into the board.
+
+All strokes, from games or cursive text alike, are passed through
+`build_continuous_path()`, which bridges the pen-lifts between them with
+straight connectors so the cursor traces one continuous path instead of
+teleporting.
 
 ## How the cursive shapes are built
 
 Letters come from the Hershey "cursive" font (a single-stroke font
 designed for pen plotters, which maps naturally onto cursor movement).
-`build_name_path()` renders the requested text into strokes, then bridges
-the pen-lifts between strokes/letters with straight connectors so the
-cursor traces one continuous path instead of teleporting between letters.
+`build_name_path()` renders the requested text into strokes.
 
 A `tmp/` folder alongside this file holds the throwaway scripts used while
 prototyping (font/shape comparisons, path preview renders, etc.). It's not

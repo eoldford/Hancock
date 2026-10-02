@@ -1,10 +1,12 @@
 """
 Keeps the machine awake by requesting sleep prevention from Windows and
-slowly moving the mouse cursor along the shape of a chosen phrase written
-in cursive (default: "Lorem Ipsum"). Runs until cancelled with Ctrl+C.
+slowly moving the mouse cursor through a little game, cycling between
+tic-tac-toe, Connect Four, Pong, and Hangman playing themselves. Pass
+--spell <text> to trace that text in cursive instead. Runs until cancelled
+with Ctrl+C.
 
 Windows only: uses ctypes to call user32.dll / kernel32.dll directly
-(SetCursorPos, GetSystemMetrics, SetThreadExecutionState). The cursive
+(SetCursorPos, GetSystemMetrics, SetThreadExecutionState). Cursive mode's
 letter shapes come from the Hershey "cursive" font via the `hershey-fonts`
 pip package (pip install hershey-fonts), rendered at startup for whatever
 text is requested -- see tmp/cursive_name_design_v3.py for how this was
@@ -21,8 +23,11 @@ GetAsyncKeyState, not a keyboard hook) until you've been idle again for
 --resume-delay seconds, then glides back onto the path where it left off.
 """
 
+__version__ = "1.0.1"
+
 import argparse
 import ctypes
+import math
 import random
 import time
 from ctypes import wintypes
@@ -35,10 +40,78 @@ RETURN_STEPS = 40      # points used to glide back to the start before re-tracin
 RESUME_STEPS = 20      # points used to glide from a manual mouse move back onto the path
 PAUSE_SECONDS = 3.0    # how long the mouse must sit still before resuming after a manual move
 POSITION_TOLERANCE = 2 # pixels of slack before a position mismatch counts as a manual move
-DEFAULT_TEXT = "Lorem Ipsum"
 TIMEOUT_HOURS = 2.0    # stop automatically after this many hours
 CONNECTOR_STEPS = 8    # points added when bridging a pen-lift (between strokes/letters)
 SEGMENT_STEPS = 5      # points added along each raw font segment, for smoothness
+
+# Scripted tic-tac-toe games (cell moves as (col, row, symbol), 0-indexed),
+# chosen at random each pass. "win" is the winning triple of (col, row), or
+# None for a drawn-out game with no winner.
+TTT_GAMES = [
+    {
+        "moves": [(0, 0, "X"), (1, 1, "O"), (1, 0, "X"), (2, 1, "O"), (2, 0, "X")],
+        "win": [(0, 0), (1, 0), (2, 0)],
+    },
+    {
+        "moves": [
+            (1, 1, "X"), (0, 0, "O"), (2, 0, "X"), (0, 2, "O"),
+            (0, 1, "X"), (2, 1, "O"), (1, 0, "X"), (1, 2, "O"), (2, 2, "X"),
+        ],
+        "win": None,
+    },
+]
+
+# Scripted Connect Four games (dropped pieces as (col, row, player),
+# 0-indexed, on a 7-wide x 6-tall board), chosen at random each time this
+# game comes up in the cycle. "win" is the winning 4-in-a-row of (col, row).
+CONNECT_FOUR_GAMES = [
+    {
+        "moves": [
+            (0, 0, "R"), (0, 1, "Y"), (1, 0, "R"), (1, 1, "Y"),
+            (2, 0, "R"), (3, 1, "Y"), (3, 0, "R"),
+        ],
+        "win": [(0, 0), (1, 0), (2, 0), (3, 0)],
+    },
+    {
+        "moves": [
+            (0, 0, "R"), (0, 1, "Y"), (1, 1, "R"), (1, 2, "Y"),
+            (2, 2, "R"), (3, 0, "Y"), (3, 3, "R"),
+        ],
+        "win": [(0, 0), (1, 1), (2, 2), (3, 3)],
+    },
+]
+
+# Scripted Pong rallies: a continuous back-and-forth ball path (in
+# normalized court units, 0-4 x 0-2.5), chosen at random each time this
+# game comes up in the cycle. The court outline and paddles are fixed.
+PONG_RALLIES = [
+    [(0.2, 1.0), (2.0, 2.3), (3.8, 0.3), (1.5, 0.2), (0.2, 1.8), (2.5, 0.1), (3.8, 2.0), (0.2, 1.2)],
+    [(0.2, 2.0), (1.3, 0.2), (3.0, 2.2), (3.8, 1.0), (1.8, 0.2), (0.2, 1.5), (3.8, 2.1)],
+]
+
+# Gallows (fixed) and hanged figure (drawn only on a loss) for Hangman, in
+# normalized units where larger y is higher up -- the ground sits at y=0.
+HANGMAN_GALLOWS = [
+    [(0, 0), (2, 0)],          # base
+    [(0.5, 0), (0.5, 3)],      # pole
+    [(0.5, 3), (2.5, 3)],      # beam
+    [(0.5, 2), (1.3, 3)],      # brace
+    [(2.5, 3), (2.5, 2.2)],    # rope
+]
+HANGMAN_FIGURE = [
+    [(2.1, 1.1), (2.5, 1.3), (2.9, 1.1)],  # arms, through the shoulder
+    [(2.5, 1.6), (2.5, 0.8)],              # body
+    [(2.2, 0.5), (2.5, 0.8), (2.8, 0.5)],  # legs, through the hip
+]
+
+# Scripted Hangman rounds: a word, and whether it ends fully revealed (win)
+# or fully hanged with the word left blank (lose), chosen at random each
+# time this game comes up in the cycle.
+HANGMAN_ROUNDS = [
+    {"word": "Mouse", "outcome": "win"},
+    {"word": "Cursor", "outcome": "lose"},
+    {"word": "Pixel", "outcome": "win"},
+]
 
 ES_CONTINUOUS = 0x80000000
 ES_SYSTEM_REQUIRED = 0x00000001
@@ -76,6 +149,10 @@ def positions_match(a, b, tolerance=POSITION_TOLERANCE):
     return abs(a[0] - b[0]) <= tolerance and abs(a[1] - b[1]) <= tolerance
 
 
+def log(message):
+    print(f"[{time.strftime('%H:%M:%S')}] {message}")
+
+
 def key_was_pressed():
     """Return True if any key was pressed since the last call. Relies on
     GetAsyncKeyState's low-order bit, which reports "pressed since the
@@ -110,24 +187,127 @@ def wait_for_user_to_settle(pause_seconds=PAUSE_SECONDS, poll_interval=0.3):
     return last_pos
 
 
+def build_continuous_path(strokes):
+    """Bridge a list of pen-lifted strokes (each a list of points, in
+    normalized units) into one continuous pen path, interpolating connectors
+    between strokes and smoothing each stroke's own segments, so the cursor
+    never teleports."""
+    path = [strokes[0][0]]
+    for stroke_index, stroke in enumerate(strokes):
+        if stroke_index > 0:
+            path += interpolate(path[-1], stroke[0], CONNECTOR_STEPS)
+        for point in stroke[1:]:
+            path += interpolate(path[-1], point, SEGMENT_STEPS)
+    return path
+
+
+def build_circle_stroke(cx, cy, radius, points=16):
+    """A closed circular stroke (returns to its own start point) centered
+    at (cx, cy)."""
+    return [
+        (cx + radius * math.cos(2 * math.pi * i / points), cy + radius * math.sin(2 * math.pi * i / points))
+        for i in range(points + 1)
+    ]
+
+
+def rescale_path(path, box):
+    """Rescale `path` to fit within `box` (x0, y0, x1, y1), preserving
+    aspect ratio, anchored at the box's bottom-left corner."""
+    x0, y0, x1, y1 = box
+    xs = [p[0] for p in path]
+    ys = [p[1] for p in path]
+    x_min, x_max = min(xs), max(xs)
+    y_min, y_max = min(ys), max(ys)
+    scale = min((x1 - x0) / (x_max - x_min), (y1 - y0) / (y_max - y_min))
+    return [(x0 + (x - x_min) * scale, y0 + (y - y_min) * scale) for x, y in path]
+
+
 def build_name_path(text):
     """Render `text` with the Hershey cursive font into a single continuous
-    pen path (in normalized font units), bridging pen-lifts between strokes
-    and letters with straight connectors so the cursor never teleports."""
+    pen path (in normalized font units)."""
     h = HersheyFonts()
     h.load_default_font("cursive")
     h.normalize_rendering(1.0)
     strokes = list(h.strokes_for_text(text))
     if not strokes:
         raise ValueError(f"No renderable characters in: {text!r}")
+    return build_continuous_path(strokes)
 
-    name_path = [strokes[0][0]]
-    for stroke_index, stroke in enumerate(strokes):
-        if stroke_index > 0:
-            name_path += interpolate(name_path[-1], stroke[0], CONNECTOR_STEPS)
-        for point in stroke[1:]:
-            name_path += interpolate(name_path[-1], point, SEGMENT_STEPS)
-    return name_path
+
+def build_mark_strokes(col, row, symbol):
+    """Strokes for an X or O inside the given grid cell (0-indexed)."""
+    if symbol == "X":
+        return [
+            [(col + 0.15, row + 0.15), (col + 0.85, row + 0.85)],
+            [(col + 0.85, row + 0.15), (col + 0.15, row + 0.85)],
+        ]
+    return [build_circle_stroke(col + 0.5, row + 0.5, 0.35)]
+
+
+def build_tic_tac_toe_path():
+    """Pick a random scripted game and render the grid, the moves in order,
+    and (if there's a winner) the strike-through line, as one continuous
+    pen path (in normalized grid units)."""
+    game = random.choice(TTT_GAMES)
+    strokes = [
+        [(1, 0), (1, 3)],
+        [(2, 0), (2, 3)],
+        [(0, 1), (3, 1)],
+        [(0, 2), (3, 2)],
+    ]
+    for col, row, symbol in game["moves"]:
+        strokes.extend(build_mark_strokes(col, row, symbol))
+    if game["win"]:
+        (c0, r0), (c1, r1) = game["win"][0], game["win"][-1]
+        strokes.append([(c0 + 0.5, r0 + 0.5), (c1 + 0.5, r1 + 0.5)])
+    return build_continuous_path(strokes)
+
+
+def build_connect_four_path():
+    """Pick a random scripted Connect Four game and render the 7x6 grid,
+    the dropped pieces in order, and the winning line, as one continuous
+    pen path (in normalized grid units)."""
+    game = random.choice(CONNECT_FOUR_GAMES)
+    strokes = [[(col, 0), (col, 6)] for col in range(1, 7)]
+    strokes += [[(0, row), (7, row)] for row in range(1, 6)]
+    for col, row, player in game["moves"]:
+        strokes.append(build_circle_stroke(col + 0.5, row + 0.5, 0.35))
+    (c0, r0), (c1, r1) = game["win"][0], game["win"][-1]
+    strokes.append([(c0 + 0.5, r0 + 0.5), (c1 + 0.5, r1 + 0.5)])
+    return build_continuous_path(strokes)
+
+
+def build_pong_path():
+    """Pick a random scripted Pong rally and render the court, both
+    paddles, and the ball's bouncing path, as one continuous pen path (in
+    normalized court units)."""
+    rally = random.choice(PONG_RALLIES)
+    strokes = [
+        [(0, 0), (4, 0), (4, 2.5), (0, 2.5), (0, 0)],  # court outline
+        [(0.15, 0.85), (0.15, 1.65)],                  # left paddle
+        [(3.85, 0.85), (3.85, 1.65)],                  # right paddle
+        rally,                                         # ball's bounce path
+    ]
+    return build_continuous_path(strokes)
+
+
+def build_hangman_path():
+    """Pick a random scripted Hangman round and render the gallows, plus
+    either the revealed word (win) or the hanged figure and word blanks
+    (lose), as one continuous pen path (in normalized gallows units)."""
+    round_ = random.choice(HANGMAN_ROUNDS)
+    strokes = list(HANGMAN_GALLOWS)
+    if round_["outcome"] == "lose":
+        strokes.append(build_circle_stroke(2.5, 1.9, 0.3))
+        strokes += HANGMAN_FIGURE
+        strokes += [[(i * 0.5, -0.6), (i * 0.5 + 0.3, -0.6)] for i in range(len(round_["word"]))]
+    else:
+        box = (0, -1.0, len(round_["word"]) * 0.5, -0.3)
+        strokes.append(rescale_path(build_name_path(round_["word"]), box))
+    return build_continuous_path(strokes)
+
+
+GAME_BUILDERS = [build_tic_tac_toe_path, build_connect_four_path, build_pong_path, build_hangman_path]
 
 
 def build_screen_path(name_path):
@@ -174,13 +354,13 @@ def move_along_path(path, pause_seconds=PAUSE_SECONDS, deadline=None):
         mouse_moved = last_commanded is not None and not positions_match(get_cursor_pos(), last_commanded)
         if mouse_moved or key_pressed:
             if mouse_moved and key_pressed:
-                print("Manual mouse and keyboard activity detected -- pausing...")
+                log("Manual mouse and keyboard activity detected -- pausing...")
             elif mouse_moved:
-                print("Manual mouse movement detected -- pausing...")
+                log("Manual mouse movement detected -- pausing...")
             else:
-                print("Keyboard activity detected -- pausing...")
+                log("Keyboard activity detected -- pausing...")
             resumed_at = wait_for_user_to_settle(pause_seconds=pause_seconds)
-            print("Resuming.")
+            log("Resuming.")
             for gx, gy in interpolate(resumed_at, target, RESUME_STEPS):
                 move_cursor(gx, gy)
                 time.sleep(STEP_DELAY)
@@ -191,10 +371,15 @@ def move_along_path(path, pause_seconds=PAUSE_SECONDS, deadline=None):
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Trace text in cursive with the mouse to keep the machine awake.")
+    parser = argparse.ArgumentParser(
+        description="Keep the machine awake by playing tic-tac-toe (or tracing text in cursive) with the mouse."
+    )
     parser.add_argument(
-        "-s", "--spell", type=str, default=DEFAULT_TEXT,
-        help=f"text to trace in cursive (default: {DEFAULT_TEXT!r})",
+        "-s", "--spell", type=str, default=None,
+        help="text to trace in cursive instead of playing tic-tac-toe (default: play tic-tac-toe)",
+    )
+    parser.add_argument(
+        "--version", action="version", version=f"%(prog)s {__version__}",
     )
     parser.add_argument(
         "-r", "--resume-delay", type=float, default=PAUSE_SECONDS,
@@ -209,17 +394,27 @@ def parse_args():
 
 def main():
     args = parse_args()
-    name_path = build_name_path(args.spell)
+    cursive_mode = args.spell is not None
+    name_path = build_name_path(args.spell) if cursive_mode else None
     deadline = time.time() + args.timeout * 3600
 
-    print(f"Moving the mouse in a slow cursive trace of {args.spell!r} to keep the machine awake.")
+    if cursive_mode:
+        print(f"Moving the mouse in a slow cursive trace of {args.spell!r} to keep the machine awake.")
+    else:
+        print("Playing tic-tac-toe, Connect Four, Pong, and Hangman against itself to keep the machine awake.")
     print(f"Moving the mouse or typing will pause tracing until you've stopped for {args.resume_delay}s.")
     print(f"Will stop automatically after {args.timeout} hour(s), or press Ctrl+C to stop sooner.")
 
+    game_index = 0
     try:
         while time.time() < deadline:
             prevent_sleep()  # re-affirmed each pass through the name in case anything clears it
-            path = build_screen_path(name_path)  # re-randomizes placement each pass
+            # re-randomizes placement each pass; cycles through the games in order otherwise
+            if cursive_mode:
+                path = build_screen_path(name_path)
+            else:
+                path = build_screen_path(GAME_BUILDERS[game_index % len(GAME_BUILDERS)]())
+                game_index += 1
             move_along_path(path, pause_seconds=args.resume_delay, deadline=deadline)
         print(f"\nTimeout of {args.timeout} hour(s) reached. Stopping.")
     except KeyboardInterrupt:
