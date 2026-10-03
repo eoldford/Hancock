@@ -41,6 +41,8 @@ power setting, and no user-mode script should (or can) bypass it.
   cursive letter shapes at startup for whatever text you ask for
 - [`pynput`](https://pypi.org/project/pynput/) — **macOS only**, for cursor
   control and keystroke detection
+- [`pygame-ce`](https://pypi.org/project/pygame-ce/) — optional, only needed for
+  the `--show` window
 
 Install everything for your platform with:
 
@@ -108,6 +110,7 @@ each playing out a scripted game against itself. Options:
 | `-s`, `--spell` | Text to trace in cursive instead of playing games | `None` (plays games) |
 | `-r`, `--resume-delay` | Seconds of no mouse movement or keystrokes before resuming after you interrupt it | `3.0` |
 | `-t`, `--timeout` | Stop automatically after this many hours | `2.0` |
+| `--show` | Also open a window that draws the trace as the cursor moves | off |
 | `--version` | Print the version and exit | |
 
 Examples:
@@ -117,6 +120,8 @@ python Hancock.py
 python Hancock.py -s "Evan P Oldford"
 python Hancock.py -s "Evan P Oldford" -r 5
 python Hancock.py -t 12
+python Hancock.py --show
+python Hancock.py -s "Evan P Oldford" --show
 ```
 
 ## Behavior
@@ -131,6 +136,11 @@ python Hancock.py -t 12
 - **Randomized placement.** Each full pass picks a new random on-screen
   position (still fully within screen bounds), so the trace doesn't sit
   over the same pixels for hours on end.
+- **Optional live canvas.** With `--show`, a window draws each pass —
+  game or cursive text — in cyan on a dark canvas as the cursor traces it,
+  clearing at the start of the next pass. It's handy for seeing what
+  Hancock is doing while the cursor is off on another screen area.
+  Closing the window stops Hancock.
 - **Self-limiting.** Stops on its own after `--timeout` hours, or
   immediately on Ctrl+C. Either way it releases the sleep-prevention
   request on exit.
