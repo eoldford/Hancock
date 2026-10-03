@@ -1,6 +1,6 @@
 # Hancock
 
-Keeps a Windows machine awake and, as a visual, moves the mouse cursor
+Keeps a Windows or macOS machine awake and, as a visual, moves the mouse cursor
 through a little game — cycling between tic-tac-toe, Connect Four, Pong,
 and Hangman playing themselves. Pass `--spell <text>` to trace that text
 in cursive instead. Runs until you cancel it (Ctrl+C) or it hits its own
@@ -23,7 +23,9 @@ devices with mouse-jiggler detection enabled.
 `Hancock.py` instead calls `SetThreadExecutionState` with
 `ES_SYSTEM_REQUIRED | ES_DISPLAY_REQUIRED` — the actual Windows API apps
 like video players and installers use to say "don't sleep, I need this."
-The cursor tracing is purely cosmetic; it isn't what prevents sleep.
+On macOS the equivalent is `caffeinate -d -i`, which Hancock runs as a
+child process for as long as it's running. The cursor tracing is purely
+cosmetic on either OS; it isn't what prevents sleep.
 
 Note: this cannot and does not try to override a hard **lock-screen**
 policy enforced by IT via Group Policy. If your device locks the session
@@ -32,17 +34,67 @@ power setting, and no user-mode script should (or can) bypass it.
 
 ## Requirements
 
-- Windows
-- Python 3
+- Windows or macOS
+- Python 3.9 or newer (see [Installing Python](#installing-python) if you
+  don't have it)
 - [`hershey-fonts`](https://pypi.org/project/hershey-fonts/) — renders the
-  cursive letter shapes at startup for whatever text you ask for:
+  cursive letter shapes at startup for whatever text you ask for
+- [`pynput`](https://pypi.org/project/pynput/) — **macOS only**, for cursor
+  control and keystroke detection
+- [`pygame-ce`](https://pypi.org/project/pygame-ce/) — optional, only needed for
+  the `--show` window
 
-  ```bash
-  pip install hershey-fonts
-  ```
+Install everything for your platform with:
 
-No other dependencies. Mouse/keyboard control and sleep prevention use
-`ctypes` calls into `user32.dll` / `kernel32.dll` directly.
+```bash
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+```
+
+Upgrading pip first matters: older pip versions can miss the prebuilt
+packages and try to compile them from source instead, which usually fails.
+(On macOS, use `python3` in place of `python` if `python` isn't found.)
+
+**Windows:** no other dependencies. Mouse/keyboard control and sleep
+prevention use `ctypes` calls into `user32.dll` / `kernel32.dll` directly.
+
+**macOS:** sleep prevention uses the built-in `caffeinate` command, and
+screen size comes from CoreGraphics via `ctypes`. The first time you run
+it, grant the terminal app you launch it from (Terminal, iTerm, VS Code,
+etc.) both of these in **System Settings → Privacy & Security**:
+
+- **Accessibility** — needed to move the cursor
+- **Input Monitoring** — needed to notice when you start typing
+
+Restart the terminal app after granting them.
+
+### Installing Python
+
+Check whether you already have it:
+
+```bash
+python --version     # Windows
+python3 --version    # macOS
+```
+
+If that prints 3.9 or newer, you're set. Otherwise:
+
+- **Windows:** `winget install Python.Python.3.13`, or download the
+  installer from [python.org](https://www.python.org/downloads/) and tick
+  **"Add python.exe to PATH"** on the first screen. Open a new terminal
+  afterwards.
+- **macOS:** `brew install python` if you use
+  [Homebrew](https://brew.sh/), or download the installer from
+  [python.org](https://www.python.org/downloads/).
+
+Optionally, keep Hancock's packages separate from the rest of your system
+in a virtual environment:
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate      # macOS
+.venv\Scripts\activate         # Windows
+```
 
 ## Usage
 
@@ -58,6 +110,7 @@ each playing out a scripted game against itself. Options:
 | `-s`, `--spell` | Text to trace in cursive instead of playing games | `None` (plays games) |
 | `-r`, `--resume-delay` | Seconds of no mouse movement or keystrokes before resuming after you interrupt it | `3.0` |
 | `-t`, `--timeout` | Stop automatically after this many hours | `2.0` |
+| `--show` | Also open a window that draws the trace as the cursor moves | off |
 | `--version` | Print the version and exit | |
 
 Examples:
@@ -67,6 +120,8 @@ python Hancock.py
 python Hancock.py -s "Evan P Oldford"
 python Hancock.py -s "Evan P Oldford" -r 5
 python Hancock.py -t 12
+python Hancock.py --show
+python Hancock.py -s "Evan P Oldford" --show
 ```
 
 ## Behavior
@@ -74,13 +129,18 @@ python Hancock.py -t 12
 - **Won't fight you for the mouse.** If you move the mouse or start
   typing, tracing pauses immediately. It waits until you've been fully
   idle (no mouse movement, no keystrokes — checked via polled
-  `GetAsyncKeyState`, not a keyboard hook) for `--resume-delay` seconds,
+  `GetAsyncKeyState` on Windows, or a `pynput` listener on macOS) for `--resume-delay` seconds,
   then glides smoothly from wherever you left the cursor back onto the
   path at the exact point it paused, rather than jumping or resuming from
   the start.
 - **Randomized placement.** Each full pass picks a new random on-screen
   position (still fully within screen bounds), so the trace doesn't sit
   over the same pixels for hours on end.
+- **Optional live canvas.** With `--show`, a window draws each pass —
+  game or cursive text — in cyan on a dark canvas as the cursor traces it,
+  clearing at the start of the next pass. It's handy for seeing what
+  Hancock is doing while the cursor is off on another screen area.
+  Closing the window stops Hancock.
 - **Self-limiting.** Stops on its own after `--timeout` hours, or
   immediately on Ctrl+C. Either way it releases the sleep-prevention
   request on exit.
