@@ -1,36 +1,57 @@
 """
-Keeps the machine awake by requesting sleep prevention from Windows and
+Keeps the machine awake by requesting sleep prevention from the OS and
 slowly moving the mouse cursor through a little game, cycling between
 tic-tac-toe, Connect Four, Pong, and Hangman playing themselves. Pass
 --spell <text> to trace that text in cursive instead. Runs until cancelled
 with Ctrl+C.
 
-Windows only: uses ctypes to call user32.dll / kernel32.dll directly
-(SetCursorPos, GetSystemMetrics, SetThreadExecutionState). Cursive mode's
-letter shapes come from the Hershey "cursive" font via the `hershey-fonts`
-pip package (pip install hershey-fonts), rendered at startup for whatever
-text is requested -- see tmp/cursive_name_design_v3.py for how this was
-first prototyped against a fixed name.
+Runs on Windows and macOS. Cursive mode's letter shapes come from the
+Hershey "cursive" font via the `hershey-fonts` pip package (pip install
+hershey-fonts), rendered at startup for whatever text is requested -- see
+tmp/cursive_name_design_v3.py for how this was first prototyped against a
+fixed name.
 
-Moving the cursor alone isn't reliably recognized by Windows' sleep-idle
+Windows: uses ctypes to call user32.dll / kernel32.dll directly
+(SetCursorPos, GetCursorPos, GetSystemMetrics, GetAsyncKeyState,
+SetThreadExecutionState).
+
+macOS: sleep prevention runs `caffeinate -d -i` as a child process; screen
+size comes from CoreGraphics via ctypes; cursor control and keystroke
+detection use `pynput` (pip install pynput). The terminal app running
+Python needs Accessibility and Input Monitoring permission in System
+Settings -> Privacy & Security.
+
+Moving the cursor alone isn't reliably recognized by the OS's sleep-idle
 tracking (and can be ignored outright on managed devices with mouse-jiggler
-detection). SetThreadExecutionState is the actual sanctioned API apps use
-to tell the power manager "don't sleep" -- the cursor trace here is just
-the visual, not the mechanism preventing sleep.
+detection). SetThreadExecutionState (Windows) and caffeinate (macOS) are
+the actual sanctioned ways to tell the power manager "don't sleep" -- the
+cursor trace here is just the visual, not the mechanism preventing sleep.
 
-If you move the mouse or start typing, tracing pauses (via polled
-GetAsyncKeyState, not a keyboard hook) until you've been idle again for
---resume-delay seconds, then glides back onto the path where it left off.
+If you move the mouse or start typing, tracing pauses until you've been
+idle again for --resume-delay seconds, then glides back onto the path where
+it left off.
 """
 
 __version__ = "1.0.1"
 
+import sys
+
+# Checked before the other imports so an old interpreter gets a clear message
+# instead of a confusing failure further down.
+MIN_PYTHON = (3, 9)
+if sys.version_info < MIN_PYTHON:
+    sys.exit(
+        f"Hancock needs Python {MIN_PYTHON[0]}.{MIN_PYTHON[1]} or newer; "
+        f"this is Python {sys.version_info[0]}.{sys.version_info[1]}."
+    )
+
 import argparse
 import ctypes
 import math
+import os
+import platform
 import random
 import time
-from ctypes import wintypes
 
 from HersheyFonts import HersheyFonts
 
@@ -113,36 +134,122 @@ HANGMAN_ROUNDS = [
     {"word": "Pixel", "outcome": "win"},
 ]
 
-ES_CONTINUOUS = 0x80000000
-ES_SYSTEM_REQUIRED = 0x00000001
-ES_DISPLAY_REQUIRED = 0x00000002
+# ---------------------------------------------------------------------------
+# Platform layer -- the same six functions on Windows and macOS:
+# prevent_sleep, allow_sleep, get_screen_size, move_cursor, get_cursor_pos,
+# key_was_pressed.
+# ---------------------------------------------------------------------------
 
-user32 = ctypes.windll.user32
-kernel32 = ctypes.windll.kernel32
+_SYSTEM = platform.system()
 
+if _SYSTEM == "Windows":
+    from ctypes import wintypes
 
-def prevent_sleep():
-    kernel32.SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_DISPLAY_REQUIRED)
+    ES_CONTINUOUS = 0x80000000
+    ES_SYSTEM_REQUIRED = 0x00000001
+    ES_DISPLAY_REQUIRED = 0x00000002
 
+    user32 = ctypes.windll.user32
+    kernel32 = ctypes.windll.kernel32
 
-def allow_sleep():
-    kernel32.SetThreadExecutionState(ES_CONTINUOUS)
+    def prevent_sleep():
+        kernel32.SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_DISPLAY_REQUIRED)
 
+    def allow_sleep():
+        kernel32.SetThreadExecutionState(ES_CONTINUOUS)
 
-def get_screen_size():
-    width = user32.GetSystemMetrics(0)
-    height = user32.GetSystemMetrics(1)
-    return width, height
+    def get_screen_size():
+        width = user32.GetSystemMetrics(0)
+        height = user32.GetSystemMetrics(1)
+        return width, height
 
+    def move_cursor(x, y):
+        user32.SetCursorPos(int(x), int(y))
 
-def move_cursor(x, y):
-    user32.SetCursorPos(int(x), int(y))
+    def get_cursor_pos():
+        pt = wintypes.POINT()
+        user32.GetCursorPos(ctypes.byref(pt))
+        return pt.x, pt.y
 
+    def key_was_pressed():
+        """Return True if any key was pressed since the last call. Relies on
+        GetAsyncKeyState's low-order bit, which reports "pressed since the
+        previous call" and resets itself each time it's read -- so this must be
+        polled regularly (not called more than once per check) to stay accurate."""
+        for vk in range(1, 256):
+            if user32.GetAsyncKeyState(vk) & 0x0001:
+                return True
+        return False
 
-def get_cursor_pos():
-    pt = wintypes.POINT()
-    user32.GetCursorPos(ctypes.byref(pt))
-    return pt.x, pt.y
+elif _SYSTEM == "Darwin":
+    import ctypes.util
+    import subprocess
+    import threading
+
+    try:
+        from pynput import keyboard as _pkeyboard
+        from pynput import mouse as _pmouse
+    except ImportError:
+        sys.exit(
+            "pynput is required on macOS. Install it with:\n"
+            "    pip install -r requirements.txt\n"
+            "Then grant your terminal app Accessibility and Input Monitoring\n"
+            "permission in System Settings -> Privacy & Security."
+        )
+
+    # Main-display size in points (the same coordinate space pynput uses, so
+    # Retina scaling doesn't need special handling).
+    _CG = ctypes.cdll.LoadLibrary(ctypes.util.find_library("CoreGraphics"))
+    _CG.CGMainDisplayID.restype = ctypes.c_uint32
+    _CG.CGDisplayPixelsWide.restype = ctypes.c_size_t
+    _CG.CGDisplayPixelsWide.argtypes = [ctypes.c_uint32]
+    _CG.CGDisplayPixelsHigh.restype = ctypes.c_size_t
+    _CG.CGDisplayPixelsHigh.argtypes = [ctypes.c_uint32]
+
+    _mouse = _pmouse.Controller()
+    _caffeinate_proc = None
+
+    # macOS has no equivalent of GetAsyncKeyState's "pressed since last call"
+    # bit, so a background pynput listener sets a flag that key_was_pressed()
+    # reads and clears -- same once-per-call semantics as the Windows version.
+    _key_flag = threading.Event()
+    _key_listener = _pkeyboard.Listener(on_press=lambda key: _key_flag.set())
+    _key_listener.daemon = True
+    _key_listener.start()
+
+    def prevent_sleep():
+        # caffeinate -d (display) -i (idle system sleep); -w ties it to this
+        # process, so it exits on its own even if Python is killed abruptly.
+        global _caffeinate_proc
+        if _caffeinate_proc is None or _caffeinate_proc.poll() is not None:
+            _caffeinate_proc = subprocess.Popen(["caffeinate", "-d", "-i", "-w", str(os.getpid())])
+
+    def allow_sleep():
+        global _caffeinate_proc
+        if _caffeinate_proc is not None:
+            _caffeinate_proc.terminate()
+            _caffeinate_proc = None
+
+    def get_screen_size():
+        display = _CG.CGMainDisplayID()
+        return int(_CG.CGDisplayPixelsWide(display)), int(_CG.CGDisplayPixelsHigh(display))
+
+    def move_cursor(x, y):
+        _mouse.position = (int(x), int(y))
+
+    def get_cursor_pos():
+        x, y = _mouse.position
+        return int(x), int(y)
+
+    def key_was_pressed():
+        """Return True if any key was pressed since the last call."""
+        if _key_flag.is_set():
+            _key_flag.clear()
+            return True
+        return False
+
+else:
+    sys.exit(f"Unsupported platform: {_SYSTEM!r} (Hancock supports Windows and macOS)")
 
 
 def positions_match(a, b, tolerance=POSITION_TOLERANCE):
@@ -151,17 +258,6 @@ def positions_match(a, b, tolerance=POSITION_TOLERANCE):
 
 def log(message):
     print(f"[{time.strftime('%H:%M:%S')}] {message}")
-
-
-def key_was_pressed():
-    """Return True if any key was pressed since the last call. Relies on
-    GetAsyncKeyState's low-order bit, which reports "pressed since the
-    previous call" and resets itself each time it's read -- so this must be
-    polled regularly (not called more than once per check) to stay accurate."""
-    for vk in range(1, 256):
-        if user32.GetAsyncKeyState(vk) & 0x0001:
-            return True
-    return False
 
 
 def interpolate(p0, p1, steps):
