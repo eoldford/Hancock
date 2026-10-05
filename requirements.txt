@@ -1,0 +1,3 @@
+hershey-fonts
+pynput; sys_platform == "darwin"
+pygame-ce  # optional: only needed for --show (maintained pygame fork; same `import pygame`)
