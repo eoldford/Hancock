@@ -1,7 +1,7 @@
 """
 Keeps the machine awake by requesting sleep prevention from the OS and
 slowly moving the mouse cursor through a little game, cycling between
-tic-tac-toe, Connect Four, Pong, and Hangman playing themselves. Pass
+tic-tac-toe, Connect Four, Pong, Snowman, and a maze solve. Pass
 --spell <text> to trace that text in cursive instead. Runs until cancelled
 with Ctrl+C.
 
@@ -58,17 +58,30 @@ import random
 import threading
 import time
 
-from HersheyFonts import HersheyFonts
+try:
+    from HersheyFonts import HersheyFonts
+    HERSHEY_AVAILABLE = True
+except ImportError:
+    HERSHEY_AVAILABLE = False
 
 STEP_DELAY = 0.05      # seconds between cursor updates -- controls how slow the writing looks
 WIDTH_RATIO = 0.85     # the text spans this fraction of the screen's width
 RETURN_STEPS = 40      # points used to glide back to the start before re-tracing
 RESUME_STEPS = 20      # points used to glide from a manual mouse move back onto the path
-PAUSE_SECONDS = 3.0    # how long the mouse must sit still before resuming after a manual move
+PAUSE_SECONDS = 60.0   # how long the mouse must sit still before resuming after a manual move
 POSITION_TOLERANCE = 2 # pixels of slack before a position mismatch counts as a manual move
 TIMEOUT_HOURS = 2.0    # stop automatically after this many hours
 CONNECTOR_STEPS = 8    # points added when bridging a pen-lift (between strokes/letters)
 SEGMENT_STEPS = 5      # points added along each raw font segment, for smoothness
+BASE_LINE_STEP_LENGTH = 0.2  # normalized-unit distance per step for board/court/wall/ground
+                             # outlines -- these are long straight strokes, so without
+                             # this they'd draw much faster than the shorter pieces/marks
+PONG_BALL_STEP_LENGTH = 0.05 # normalized-unit distance per step for the ball's bounce
+                             # path -- same idea, so a rally doesn't zip across the court
+                             # in under 2 seconds
+MAZE_PATH_STEP_LENGTH = 0.1  # normalized-unit distance per step for tracing the maze's
+                             # solution path -- same idea, so the walk through corridors
+                             # isn't instant
 
 # Scripted tic-tac-toe games (cell moves as (col, row, symbol), 0-indexed),
 # chosen at random each pass. "win" is the winning triple of (col, row), or
@@ -119,28 +132,54 @@ PONG_RALLIES = [
     [(0.2, 2.0), (1.3, 0.2), (3.0, 2.2), (3.8, 1.0), (1.8, 0.2), (0.2, 1.5), (3.8, 2.1)],
 ]
 
-# Gallows (fixed) and hanged figure (drawn only on a loss) for Hangman, in
-# normalized units where larger y is higher up -- the ground sits at y=0.
-HANGMAN_GALLOWS = [
-    [(0, 0), (2, 0)],          # base
-    [(0.5, 0), (0.5, 3)],      # pole
-    [(0.5, 3), (2.5, 3)],      # beam
-    [(0.5, 2), (1.3, 3)],      # brace
-    [(2.5, 3), (2.5, 2.2)],    # rope
-]
-HANGMAN_FIGURE = [
-    [(2.1, 1.1), (2.5, 1.3), (2.9, 1.1)],  # arms, through the shoulder
-    [(2.5, 1.6), (2.5, 0.8)],              # body
-    [(2.2, 0.5), (2.5, 0.8), (2.8, 0.5)],  # legs, through the hip
+# Ground line (fixed) for the snowman game, in normalized units where
+# larger y is higher up -- the ground sits at y=0. The snowman itself
+# (drawn only on a loss) is built from circles in build_snowman_path().
+SNOWMAN_BASE = [
+    [(0, 0), (2, 0)],  # ground
 ]
 
-# Scripted Hangman rounds: a word, and whether it ends fully revealed (win)
-# or fully hanged with the word left blank (lose), chosen at random each
+# Scripted snowman rounds: a word, and whether it ends fully revealed (win)
+# or fully built with the word left blank (lose), chosen at random each
 # time this game comes up in the cycle.
-HANGMAN_ROUNDS = [
+SNOWMAN_ROUNDS = [
     {"word": "Mouse", "outcome": "win"},
     {"word": "Cursor", "outcome": "lose"},
     {"word": "Pixel", "outcome": "win"},
+]
+
+# Scripted mazes (walls as (x0, y0)-(x1, y1) segments, path as the solution
+# route through them), chosen at random each time this game comes up in the
+# cycle. The second maze is just the first mirrored left-to-right.
+MAZES = [
+    {
+        "walls": [
+            [(1, 3), (4, 3)],  # top wall, entrance gap on the left
+            [(0, 0), (3, 0)],  # bottom wall, exit gap on the right
+            [(0, 0), (0, 3)],  # left wall
+            [(4, 0), (4, 3)],  # right wall
+            [(0, 2), (3, 2)],  # upper divider, gap on the right
+            [(1, 1), (4, 1)],  # lower divider, gap on the left
+        ],
+        "path": [
+            (0.5, 3.0), (0.5, 2.5), (3.5, 2.5), (3.5, 1.5),
+            (0.5, 1.5), (0.5, 0.5), (3.5, 0.5), (3.5, 0.0),
+        ],
+    },
+    {
+        "walls": [
+            [(0, 3), (3, 3)],  # top wall, entrance gap on the right
+            [(1, 0), (4, 0)],  # bottom wall, exit gap on the left
+            [(0, 0), (0, 3)],  # left wall
+            [(4, 0), (4, 3)],  # right wall
+            [(1, 2), (4, 2)],  # upper divider, gap on the left
+            [(0, 1), (3, 1)],  # lower divider, gap on the right
+        ],
+        "path": [
+            (3.5, 3.0), (3.5, 2.5), (0.5, 2.5), (0.5, 1.5),
+            (3.5, 1.5), (3.5, 0.5), (0.5, 0.5), (0.5, 0.0),
+        ],
+    },
 ]
 
 # ---------------------------------------------------------------------------
@@ -273,8 +312,9 @@ else:
 
 
 # Set to a queue.Queue when --show is active; the tracing loop posts
-# ("path", points) at the start of each pass and ("pt", index) after each
-# cursor step, and the overlay window draws from it. None means no overlay.
+# ("path", points, pen_down) at the start of each pass and ("pt", index)
+# after each cursor step, and the overlay window draws from it (skipping
+# segments where pen_down is False). None means no overlay.
 _draw_queue = None
 
 
@@ -312,18 +352,52 @@ def wait_for_user_to_settle(pause_seconds=PAUSE_SECONDS, poll_interval=0.3, stop
     return last_pos
 
 
-def build_continuous_path(strokes):
+def build_continuous_path(strokes, step_length=None):
     """Bridge a list of pen-lifted strokes (each a list of points, in
     normalized units) into one continuous pen path, interpolating connectors
     between strokes and smoothing each stroke's own segments, so the cursor
-    never teleports."""
+    never teleports. Returns (path, pen_down), where pen_down[i] says
+    whether the segment from path[i-1] to path[i] is part of a stroke (True)
+    or just a connector bridging a pen-lift (False) -- --show uses this to
+    skip drawing the connectors.
+
+    By default each raw segment gets a fixed SEGMENT_STEPS points, which
+    looks right for the short segments pieces/marks/letters are made of.
+    Pass `step_length` for long straight strokes (board/court/wall/ground
+    outlines) so their step count scales with length instead -- otherwise
+    they'd draw much faster than everything else sharing the same fixed
+    step count."""
     path = [strokes[0][0]]
+    pen_down = [False]
     for stroke_index, stroke in enumerate(strokes):
         if stroke_index > 0:
-            path += interpolate(path[-1], stroke[0], CONNECTOR_STEPS)
+            connector = interpolate(path[-1], stroke[0], CONNECTOR_STEPS)
+            path += connector
+            pen_down += [False] * len(connector)
         for point in stroke[1:]:
-            path += interpolate(path[-1], point, SEGMENT_STEPS)
-    return path
+            if step_length is not None:
+                distance = math.hypot(point[0] - path[-1][0], point[1] - path[-1][1])
+                steps = max(2, round(distance / step_length))
+            else:
+                steps = SEGMENT_STEPS
+            segment = interpolate(path[-1], point, steps)
+            path += segment
+            pen_down += [True] * len(segment)
+    return path, pen_down
+
+
+def join_paths(*path_pen_pairs):
+    """Concatenate several (path, pen_down) pairs end-to-end, bridging each
+    gap with its own pen-lift connector (so the cursor still glides between
+    them smoothly, but --show won't draw a transit line)."""
+    path, pen_down = list(path_pen_pairs[0][0]), list(path_pen_pairs[0][1])
+    for next_path, next_pen in path_pen_pairs[1:]:
+        connector = interpolate(path[-1], next_path[0], CONNECTOR_STEPS)
+        path += connector
+        pen_down += [False] * len(connector)
+        path += next_path[1:]
+        pen_down += next_pen[1:]
+    return path, pen_down
 
 
 def build_circle_stroke(cx, cy, radius, points=16):
@@ -347,9 +421,38 @@ def rescale_path(path, box):
     return [(x0 + (x - x_min) * scale, y0 + (y - y_min) * scale) for x, y in path]
 
 
+DOODLE_STEP_LENGTH = 0.0125 # normalized-unit distance covered per interpolation step -- keeps
+                          # doodle speed constant regardless of how far apart two random
+                          # waypoints land, instead of the fixed step count elsewhere that
+                          # speeds up over longer hops
+
+
+def build_doodle_path(num_points=10, bounds=(0, 0, 4, 2.5)):
+    """A smooth, meandering random path (in normalized units), used in place
+    of cursive text when hershey-fonts isn't installed. Each segment's step
+    count scales with its length, so the cursor moves at a constant speed
+    throughout rather than flying through longer hops between waypoints.
+    Returns (path, pen_down) like build_continuous_path -- doodling has no
+    pen lifts, so every segment after the first is drawn."""
+    x0, y0, x1, y1 = bounds
+    waypoints = [(random.uniform(x0, x1), random.uniform(y0, y1)) for _ in range(num_points)]
+    path = [waypoints[0]]
+    pen_down = [False]
+    for point in waypoints[1:]:
+        distance = math.hypot(point[0] - path[-1][0], point[1] - path[-1][1])
+        steps = max(2, round(distance / DOODLE_STEP_LENGTH))
+        segment = interpolate(path[-1], point, steps)
+        path += segment
+        pen_down += [True] * len(segment)
+    return path, pen_down
+
+
 def build_name_path(text):
     """Render `text` with the Hershey cursive font into a single continuous
-    pen path (in normalized font units)."""
+    pen path (in normalized font units). Falls back to a random doodle path
+    if hershey-fonts isn't installed."""
+    if not HERSHEY_AVAILABLE:
+        return build_doodle_path()
     h = HersheyFonts()
     h.load_default_font("cursive")
     h.normalize_rendering(1.0)
@@ -372,74 +475,110 @@ def build_mark_strokes(col, row, symbol):
 def build_tic_tac_toe_path():
     """Pick a random scripted game and render the grid, the moves in order,
     and (if there's a winner) the strike-through line, as one continuous
-    pen path (in normalized grid units)."""
+    pen path (in normalized grid units). The grid is drawn as its own base
+    path, at base-line speed."""
     game = random.choice(TTT_GAMES)
-    strokes = [
+    grid_strokes = [
         [(1, 0), (1, 3)],
         [(2, 0), (2, 3)],
         [(0, 1), (3, 1)],
         [(0, 2), (3, 2)],
     ]
+    move_strokes = []
     for col, row, symbol in game["moves"]:
-        strokes.extend(build_mark_strokes(col, row, symbol))
+        move_strokes.extend(build_mark_strokes(col, row, symbol))
     if game["win"]:
         (c0, r0), (c1, r1) = game["win"][0], game["win"][-1]
-        strokes.append([(c0 + 0.5, r0 + 0.5), (c1 + 0.5, r1 + 0.5)])
-    return build_continuous_path(strokes)
+        move_strokes.append([(c0 + 0.5, r0 + 0.5), (c1 + 0.5, r1 + 0.5)])
+    grid_path = build_continuous_path(grid_strokes, step_length=BASE_LINE_STEP_LENGTH)
+    moves_path = build_continuous_path(move_strokes)
+    return join_paths(grid_path, moves_path)
 
 
 def build_connect_four_path():
     """Pick a random scripted Connect Four game and render the 7x6 grid,
     the dropped pieces in order, and the winning line, as one continuous
-    pen path (in normalized grid units)."""
+    pen path (in normalized grid units). The grid is drawn as its own base
+    path, at base-line speed."""
     game = random.choice(CONNECT_FOUR_GAMES)
-    strokes = [[(col, 0), (col, 6)] for col in range(1, 7)]
-    strokes += [[(0, row), (7, row)] for row in range(1, 6)]
+    grid_strokes = [[(col, 0), (col, 6)] for col in range(1, 7)]
+    grid_strokes += [[(0, row), (7, row)] for row in range(1, 6)]
+    move_strokes = []
     for col, row, player in game["moves"]:
-        strokes.append(build_circle_stroke(col + 0.5, row + 0.5, 0.35))
+        move_strokes.append(build_circle_stroke(col + 0.5, row + 0.5, 0.35))
     (c0, r0), (c1, r1) = game["win"][0], game["win"][-1]
-    strokes.append([(c0 + 0.5, r0 + 0.5), (c1 + 0.5, r1 + 0.5)])
-    return build_continuous_path(strokes)
+    move_strokes.append([(c0 + 0.5, r0 + 0.5), (c1 + 0.5, r1 + 0.5)])
+    grid_path = build_continuous_path(grid_strokes, step_length=BASE_LINE_STEP_LENGTH)
+    moves_path = build_continuous_path(move_strokes)
+    return join_paths(grid_path, moves_path)
 
 
 def build_pong_path():
     """Pick a random scripted Pong rally and render the court, both
     paddles, and the ball's bouncing path, as one continuous pen path (in
-    normalized court units)."""
+    normalized court units). The court and paddles are drawn as their own
+    base path, at base-line speed."""
     rally = random.choice(PONG_RALLIES)
-    strokes = [
+    base_strokes = [
         [(0, 0), (4, 0), (4, 2.5), (0, 2.5), (0, 0)],  # court outline
         [(0.15, 0.85), (0.15, 1.65)],                  # left paddle
         [(3.85, 0.85), (3.85, 1.65)],                  # right paddle
-        rally,                                         # ball's bounce path
     ]
-    return build_continuous_path(strokes)
+    base_path = build_continuous_path(base_strokes, step_length=BASE_LINE_STEP_LENGTH)
+    ball_path = build_continuous_path([rally], step_length=PONG_BALL_STEP_LENGTH)
+    return join_paths(base_path, ball_path)
 
 
-def build_hangman_path():
-    """Pick a random scripted Hangman round and render the gallows, plus
-    either the revealed word (win) or the hanged figure and word blanks
-    (lose), as one continuous pen path (in normalized gallows units)."""
-    round_ = random.choice(HANGMAN_ROUNDS)
-    strokes = list(HANGMAN_GALLOWS)
+def build_snowman_path():
+    """Pick a random scripted snowman round and render the ground, plus
+    either the revealed word (win) or the snowman and word blanks (lose),
+    as one continuous pen path (in normalized units). The ground is drawn
+    as its own base path, at base-line speed."""
+    round_ = random.choice(SNOWMAN_ROUNDS)
+    base_path = build_continuous_path(list(SNOWMAN_BASE), step_length=BASE_LINE_STEP_LENGTH)
     if round_["outcome"] == "lose":
-        strokes.append(build_circle_stroke(2.5, 1.9, 0.3))
-        strokes += HANGMAN_FIGURE
-        strokes += [[(i * 0.5, -0.6), (i * 0.5 + 0.3, -0.6)] for i in range(len(round_["word"]))]
-    else:
-        box = (0, -1.0, len(round_["word"]) * 0.5, -0.3)
-        strokes.append(rescale_path(build_name_path(round_["word"]), box))
-    return build_continuous_path(strokes)
+        action_strokes = [
+            build_circle_stroke(1.0, 0.6, 0.6),    # bottom
+            build_circle_stroke(1.0, 1.5, 0.45),   # middle
+            build_circle_stroke(1.0, 2.15, 0.3),   # head
+            [(0.55, 1.5), (0.1, 1.7)],              # left arm
+            [(1.45, 1.5), (1.9, 1.7)],               # right arm
+        ]
+        action_strokes += [[(i * 0.5, -0.6), (i * 0.5 + 0.3, -0.6)] for i in range(len(round_["word"]))]
+        action_path = build_continuous_path(action_strokes)
+        return join_paths(base_path, action_path)
+    box = (0, -1.0, len(round_["word"]) * 0.5, -0.3)
+    word_path, word_pen = build_name_path(round_["word"])
+    word_path = rescale_path(word_path, box)
+    return join_paths(base_path, (word_path, word_pen))
 
 
-GAME_BUILDERS = [build_tic_tac_toe_path, build_connect_four_path, build_pong_path, build_hangman_path]
+def build_maze_path():
+    """Pick a random scripted maze and render its walls, then trace the
+    solution path through them, as one continuous pen path (in normalized
+    grid units). The walls are drawn as their own base path, at base-line
+    speed."""
+    maze = random.choice(MAZES)
+    walls_path = build_continuous_path(maze["walls"], step_length=BASE_LINE_STEP_LENGTH)
+    solution_path = build_continuous_path([maze["path"]], step_length=MAZE_PATH_STEP_LENGTH)
+    return join_paths(walls_path, solution_path)
+
+
+GAME_BUILDERS = [
+    build_tic_tac_toe_path, build_connect_four_path, build_pong_path,
+    build_snowman_path, build_maze_path,
+]
 
 
 def build_screen_path(name_path):
+    """Rescale and place a (path, pen_down) pair onto the screen, appending
+    a glide back to the start. Returns (screen_path, pen_down) -- the
+    return glide is marked pen-up, same as any other connector."""
     screen_width, screen_height = get_screen_size()
+    path, pen_down = name_path
 
-    xs = [p[0] for p in name_path]
-    ys = [p[1] for p in name_path]
+    xs = [p[0] for p in path]
+    ys = [p[1] for p in path]
     x_min, x_max = min(xs), max(xs)
     y_min, y_max = min(ys), max(ys)
 
@@ -457,13 +596,13 @@ def build_screen_path(name_path):
     # flip y: font data has larger y = higher up, but screen y grows downward
     screen_path = [
         (origin_x + (x - x_min) * scale, origin_y + (y_max - y) * scale)
-        for x, y in name_path
+        for x, y in path
     ]
 
     # glide back to the start instead of jumping, so looping stays smooth
     return_path = interpolate(screen_path[-1], screen_path[0], RETURN_STEPS)
 
-    return screen_path + return_path
+    return screen_path + return_path, pen_down + [False] * len(return_path)
 
 
 def move_along_path(path, pause_seconds=PAUSE_SECONDS, deadline=None, stop_event=None):
@@ -509,6 +648,10 @@ OVERLAY_BG_COLOR = (13, 13, 13)      # near-black
 OVERLAY_LINE_WIDTH = 3
 OVERLAY_PADDING = 32                 # pixels of margin around the drawing
 OVERLAY_MAX_SIZE = (960, 540)        # largest canvas, shrunk to fit small screens
+OVERLAY_ACTIVE_FPS = 60              # redraw rate right after drawing something new
+OVERLAY_IDLE_FPS = 10                # redraw rate while there's nothing new to draw
+                                      # (e.g. during a pause/resume wait) -- still
+                                      # responsive enough to notice the window closing
 
 
 def fit_path_to_canvas(path, canvas_width, canvas_height, padding=OVERLAY_PADDING):
@@ -546,13 +689,14 @@ def run_overlay(title, stop_event):
     window.fill(OVERLAY_BG_COLOR)
 
     canvas_path = []
-    draw_limit = 0  # stop before the glide back to the start, so it isn't drawn
+    canvas_pen = []  # canvas_pen[i]: whether to draw the line into canvas_path[i]
     last_index = 0
     try:
         while not stop_event.is_set():
             for event in pygame.event.get():
                 if event.type == pygame.QUIT:  # window closed, or Ctrl+C under SDL
                     stop_event.set()
+            changed = False
             try:
                 while True:
                     item = _draw_queue.get_nowait()
@@ -560,20 +704,28 @@ def run_overlay(title, stop_event):
                         stop_event.set()
                         break
                     if item[0] == "path":
-                        screen_path = item[1]
-                        draw_limit = max(len(screen_path) - RETURN_STEPS, 1)
-                        canvas_path = fit_path_to_canvas(screen_path[:draw_limit], canvas_width, canvas_height)
+                        screen_path, canvas_pen = item[1], item[2]
+                        canvas_path = fit_path_to_canvas(screen_path, canvas_width, canvas_height)
                         last_index = 0
                         window.fill(OVERLAY_BG_COLOR)
+                        changed = True
                     elif item[0] == "pt":
-                        end = min(item[1], draw_limit - 1)
+                        end = item[1]
                         for i in range(last_index + 1, end + 1):
-                            pygame.draw.line(window, OVERLAY_TRACE_COLOR, canvas_path[i - 1], canvas_path[i], OVERLAY_LINE_WIDTH)
+                            if canvas_pen[i]:
+                                pygame.draw.line(window, OVERLAY_TRACE_COLOR, canvas_path[i - 1], canvas_path[i], OVERLAY_LINE_WIDTH)
                         last_index = max(last_index, end)
+                        changed = True
             except queue.Empty:
                 pass
-            pygame.display.flip()
-            clock.tick(60)
+            # Only flip (and poll events quickly) when something new was drawn --
+            # otherwise (e.g. during a pause/resume wait) there's nothing to show,
+            # so idle at a much lower rate instead of spinning at 60fps for no reason.
+            if changed:
+                pygame.display.flip()
+                clock.tick(OVERLAY_ACTIVE_FPS)
+            else:
+                clock.tick(OVERLAY_IDLE_FPS)
     except KeyboardInterrupt:
         print("\nStopped.")
         stop_event.set()
@@ -594,12 +746,12 @@ def trace_until_done(args, name_path, deadline, stop_event):
         prevent_sleep()  # re-affirmed each pass through the name in case anything clears it
         # re-randomizes placement each pass; cycles through the games in order otherwise
         if name_path is not None:
-            path = build_screen_path(name_path)
+            path, pen_down = build_screen_path(name_path)
         else:
-            path = build_screen_path(GAME_BUILDERS[game_index % len(GAME_BUILDERS)]())
+            path, pen_down = build_screen_path(GAME_BUILDERS[game_index % len(GAME_BUILDERS)]())
             game_index += 1
         if _draw_queue is not None:
-            _draw_queue.put(("path", path))
+            _draw_queue.put(("path", path, pen_down))
         move_along_path(path, pause_seconds=args.resume_delay, deadline=deadline, stop_event=stop_event)
     if not stop_event.is_set():
         print(f"\nTimeout of {args.timeout} hour(s) reached. Stopping.")
