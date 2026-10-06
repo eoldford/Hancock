@@ -763,11 +763,11 @@ def parse_args():
         description="Keep the machine awake by playing tic-tac-toe (or tracing text in cursive) with the mouse."
     )
     parser.add_argument(
-        "-s", "--spell", type=str, default=None,
-        help="text to trace in cursive instead of playing tic-tac-toe (default: play tic-tac-toe)",
+        "--version", action="version", version=f"%(prog)s {__version__}",
     )
     parser.add_argument(
-        "--version", action="version", version=f"%(prog)s {__version__}",
+        "-s", "--spell", type=str, default=None,
+        help="text to trace in cursive instead of playing tic-tac-toe (default: play tic-tac-toe)",
     )
     parser.add_argument(
         "-r", "--resume-delay", type=float, default=PAUSE_SECONDS,
