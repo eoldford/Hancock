@@ -180,12 +180,24 @@ if _SYSTEM == "Windows":
         user32.GetCursorPos(ctypes.byref(pt))
         return pt.x, pt.y
 
+    # Virtual-key ranges Microsoft's VK code table documents as reserved or
+    # unassigned -- no physical key ever reports in these, on any keyboard
+    # layout, so key_was_pressed() skips them to cut the per-call count.
+    _VK_UNASSIGNED_RANGES = (
+        (0x07, 0x07), (0x0A, 0x0B), (0x0E, 0x0F), (0x3A, 0x40),
+        (0x5E, 0x5E), (0x88, 0x8F), (0x97, 0x9F), (0xB8, 0xB9),
+    )
+    _VK_CODES = tuple(
+        vk for vk in range(1, 256)
+        if not any(lo <= vk <= hi for lo, hi in _VK_UNASSIGNED_RANGES)
+    )
+
     def key_was_pressed():
         """Return True if any key was pressed since the last call. Relies on
         GetAsyncKeyState's low-order bit, which reports "pressed since the
         previous call" and resets itself each time it's read -- so this must be
         polled regularly (not called more than once per check) to stay accurate."""
-        for vk in range(1, 256):
+        for vk in _VK_CODES:
             if user32.GetAsyncKeyState(vk) & 0x0001:
                 return True
         return False
