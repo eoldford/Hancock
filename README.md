@@ -2,7 +2,7 @@
 
 Keeps a Windows or macOS machine awake and, as a visual, moves the mouse cursor
 through a little game — cycling between tic-tac-toe, Connect Four, Pong,
-and Hangman playing themselves. Pass `--spell <text>` to trace that text
+Snowman, and a maze solve. Pass `--spell <text>` to trace that text
 in cursive instead. Runs until you cancel it (Ctrl+C) or it hits its own
 timeout.
 
@@ -37,12 +37,15 @@ power setting, and no user-mode script should (or can) bypass it.
 - Windows or macOS
 - Python 3.9 or newer (see [Installing Python](#installing-python) if you
   don't have it)
-- [`hershey-fonts`](https://pypi.org/project/hershey-fonts/) — renders the
-  cursive letter shapes at startup for whatever text you ask for
+- [`hershey-fonts`](https://pypi.org/project/hershey-fonts/) — optional,
+  renders the cursive letter shapes for `-s`/`--spell` text and the Snowman
+  win reveal; without it, those fall back to doodling the mouse randomly
+  instead
 - [`pynput`](https://pypi.org/project/pynput/) — **macOS only**, for cursor
   control and keystroke detection
-- [`pygame-ce`](https://pypi.org/project/pygame-ce/) — optional, only needed for
-  the `--show` window
+- [`pygame-ce`](https://pypi.org/project/pygame-ce/) — for the `--show`
+  window, which is on by default; without it, Hancock falls back to
+  running as if `--no-show` were passed
 
 Install everything for your platform with:
 
@@ -96,6 +99,32 @@ source .venv/bin/activate      # macOS
 .venv\Scripts\activate         # Windows
 ```
 
+## Windows quickstart
+
+1. **Get Hancock**
+
+   Option A — clone the repo:
+
+   ```bash
+   git clone https://github.com/eoldford/Hancock.git && cd Hancock
+   ```
+
+   Option B — just grab `Hancock.py` with `curl` (built into Windows 10/11):
+
+   ```bash
+   curl -o Hancock.py https://raw.githubusercontent.com/eoldford/Hancock/main/Hancock.py
+   ```
+
+   Option C — download it in a browser: open
+   [Hancock.py](https://raw.githubusercontent.com/eoldford/Hancock/main/Hancock.py)
+   and save it (Ctrl+S, or right-click → Save As) as `Hancock.py`.
+
+2. **Run it**
+
+   ```bash
+   python Hancock.py
+   ```
+
 ## Usage
 
 ```bash
@@ -108,7 +137,7 @@ each playing out a scripted game against itself. Options:
 | Flag | Meaning | Default |
 |---|---|---|
 | `-s`, `--spell` | Text to trace in cursive instead of playing games | `None` (plays games) |
-| `-r`, `--resume-delay` | Seconds of no mouse movement or keystrokes before resuming after you interrupt it | `3.0` |
+| `-r`, `--resume-delay` | Seconds of no mouse movement or keystrokes before resuming after you interrupt it | `60.0` |
 | `-t`, `--timeout` | Stop automatically after this many hours | `2.0` |
 | `--show` | Also open a window that draws the trace as the cursor moves | off |
 | `--version` | Print the version and exit | |
@@ -120,8 +149,8 @@ python Hancock.py
 python Hancock.py -s "Evan P Oldford"
 python Hancock.py -s "Evan P Oldford" -r 5
 python Hancock.py -t 12
-python Hancock.py --show
-python Hancock.py -s "Evan P Oldford" --show
+python Hancock.py --no-show
+python Hancock.py -s "Evan P Oldford" --no-show
 ```
 
 ## Behavior
@@ -148,11 +177,12 @@ python Hancock.py -s "Evan P Oldford" --show
 ## How the games are built
 
 Each game (`build_tic_tac_toe_path()`, `build_connect_four_path()`,
-`build_pong_path()`, `build_hangman_path()`) picks a scripted game at
-random from a fixed set and renders its board/moves as strokes — the grid
-or court lines, then the pieces, moves, or ball path in order, plus a
-winning line or hanged figure where applicable. Hangman's revealed-word
-outcome reuses the cursive font path below, rescaled into the board.
+`build_pong_path()`, `build_snowman_path()`, `build_maze_path()`) picks a
+scripted game at random from a fixed set and renders its board/moves as
+strokes — the grid, court, or wall lines, then the pieces, moves, ball
+path, or maze solution in order, plus a winning line or snowman where
+applicable. Snowman's revealed-word outcome reuses the cursive font path
+below, rescaled into the board.
 
 All strokes, from games or cursive text alike, are passed through
 `build_continuous_path()`, which bridges the pen-lifts between them with
