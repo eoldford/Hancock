@@ -1,3 +1,4 @@
-hershey-fonts
+hershey-fonts  # optional: without it, cursive text (-s) and the Snowman win reveal doodle randomly instead
 pynput; sys_platform == "darwin"
-pygame-ce  # optional: only needed for --show (maintained pygame fork; same `import pygame`)
+pygame-ce  # needed for --show, which is on by default; without it, falls back to --no-show
+           # (maintained pygame fork; same `import pygame`)

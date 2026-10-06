@@ -31,11 +31,12 @@ If you move the mouse or start typing, tracing pauses until you've been
 idle again for --resume-delay seconds, then glides back onto the path where
 it left off.
 
-Pass --show to also open a window that draws the trace on a canvas as the
-cursor moves (needs `pygame-ce`: pip install pygame-ce).
+A window that draws the trace on a canvas as the cursor moves is on by
+default (needs `pygame-ce`: pip install pygame-ce; falls back to running
+without it if that's missing) -- pass --no-show to disable it.
 """
 
-__version__ = "1.0.1"
+__version__ = "1.0.2-015"
 
 import sys
 
@@ -777,32 +778,48 @@ def parse_args():
         help=f"stop automatically after this many hours (default: {TIMEOUT_HOURS})",
     )
     parser.add_argument(
-        "--show", action="store_true",
-        help="also open a window that draws the trace as the cursor moves (requires pygame)",
+        "--show", action=argparse.BooleanOptionalAction, default=True,
+        help="open a window that draws the trace as the cursor moves (requires pygame-ce); use --no-show to disable",
     )
     return parser.parse_args()
 
 
 def main():
     args = parse_args()
-    if args.show:
+    show = args.show
+    show_fallback = False
+    if show:
         try:
             import pygame  # noqa: F401 -- only checking it's installed
         except ImportError:
-            sys.exit("--show needs pygame-ce. Install it with:\n    pip install -r requirements.txt")
+            show = False
+            show_fallback = True
     cursive_mode = args.spell is not None
+    doodle_fallback = cursive_mode and not HERSHEY_AVAILABLE
     name_path = build_name_path(args.spell) if cursive_mode else None
     deadline = time.time() + args.timeout * 3600
 
-    if cursive_mode:
+    print(f"Hancock {__version__}")
+    if show_fallback:
+        print(
+            "pygame-ce isn't installed, so running without the --show window. "
+            "Install it with:\n    pip install pygame-ce"
+        )
+    if doodle_fallback:
+        print(
+            f"hershey-fonts isn't installed, so this will doodle randomly instead of "
+            f"tracing {args.spell!r} to keep the machine awake. Install it with:\n"
+            "    pip install hershey-fonts"
+        )
+    elif cursive_mode:
         print(f"Moving the mouse in a slow cursive trace of {args.spell!r} to keep the machine awake.")
     else:
-        print("Playing tic-tac-toe, Connect Four, Pong, and Hangman against itself to keep the machine awake.")
+        print("Playing tic-tac-toe, Connect Four, Pong, Snowman, and a maze solve to keep the machine awake.")
     print(f"Moving the mouse or typing will pause tracing until you've stopped for {args.resume_delay}s.")
     print(f"Will stop automatically after {args.timeout} hour(s), or press Ctrl+C to stop sooner.")
 
     stop_event = threading.Event()
-    if not args.show:
+    if not show:
         try:
             trace_until_done(args, name_path, deadline, stop_event)
         except KeyboardInterrupt:
