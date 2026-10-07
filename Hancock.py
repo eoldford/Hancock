@@ -36,7 +36,7 @@ default (needs `pygame-ce`: pip install pygame-ce; falls back to running
 without it if that's missing) -- pass --no-show to disable it.
 """
 
-__version__ = "1.0.2-015"
+__version__ = "1.0.2-022"
 
 import sys
 
@@ -83,6 +83,9 @@ PONG_BALL_STEP_LENGTH = 0.05 # normalized-unit distance per step for the ball's 
 MAZE_PATH_STEP_LENGTH = 0.1  # normalized-unit distance per step for tracing the maze's
                              # solution path -- same idea, so the walk through corridors
                              # isn't instant
+DRIFT_MARGIN = 20          # pixels inset from the literal screen corner for --drift mode
+DRIFT_HOLD_STEPS = 20      # points used to hold position once --drift mode has arrived,
+                           # instead of recomputing a zero-length path every pass
 
 # Scripted tic-tac-toe games (cell moves as (col, row, symbol), 0-indexed),
 # chosen at random each pass. "win" is the winning triple of (col, row), or
@@ -448,6 +451,33 @@ def build_doodle_path(num_points=10, bounds=(0, 0, 4, 2.5)):
     return path, pen_down
 
 
+def build_drift_path(deadline):
+    """A straight path from wherever the cursor currently is toward the
+    screen's bottom-left corner -- used by --drift mode. Already in
+    screen pixels (unlike every other path builder), since
+    build_screen_path's normalized-unit scaling doesn't apply here. Paced
+    from the time remaining until `deadline` (a time.time() value) rather
+    than a fixed speed, so the cursor arrives right as the timeout does,
+    however long that is -- recomputed fresh from the current position
+    and remaining time each pass, so a manual move or a pause/resume
+    doesn't throw off the arrival time. Once arrived (within a pixel),
+    returns a short "hold" instead of a near-zero-length path, so the
+    loop doesn't spin once there -- the next pass will still notice
+    straightaway if the user moves the mouse away and resume drifting."""
+    cx, cy = get_cursor_pos()
+    screen_width, screen_height = get_screen_size()
+    target = (DRIFT_MARGIN, screen_height - 1 - DRIFT_MARGIN)
+    distance = math.hypot(target[0] - cx, target[1] - cy)
+    if distance < 1:
+        path = [(cx, cy)] * DRIFT_HOLD_STEPS
+    else:
+        remaining = max(deadline - time.time(), STEP_DELAY)
+        steps = max(2, round(remaining / STEP_DELAY))
+        path = [(cx, cy)] + interpolate((cx, cy), target, steps)
+    pen_down = [False] + [True] * (len(path) - 1)
+    return path, pen_down
+
+
 def build_name_path(text):
     """Render `text` with the Hershey cursive font into a single continuous
     pen path (in normalized font units). Falls back to a random doodle path
@@ -606,12 +636,16 @@ def build_screen_path(name_path):
     return screen_path + return_path, pen_down + [False] * len(return_path)
 
 
-def move_along_path(path, pause_seconds=PAUSE_SECONDS, deadline=None, stop_event=None):
+def move_along_path(path, pause_seconds=PAUSE_SECONDS, deadline=None, stop_event=None, abort_on_resume=False):
     """Move the cursor through path, one point at a time. If the user moves
     the mouse or presses a key, pause until they're done, then glide back
     onto the path at the same point (rather than jumping or fighting for
-    control). Returns early once `deadline` (a time.time() value) has passed
-    or `stop_event` is set."""
+    control) -- unless `abort_on_resume` is set, in which case it just
+    returns once they've settled, so the caller can build a fresh path
+    instead of resuming a now-stale one (--drift mode: it should re-aim
+    from wherever the user actually moved to, not glide back to wherever
+    it was before they moved the mouse). Returns early once
+    `deadline` (a time.time() value) has passed or `stop_event` is set."""
     last_commanded = None
     for index, target in enumerate(path):
         if deadline is not None and time.time() >= deadline:
@@ -629,6 +663,8 @@ def move_along_path(path, pause_seconds=PAUSE_SECONDS, deadline=None, stop_event
                 log("Keyboard activity detected -- pausing...")
             resumed_at = wait_for_user_to_settle(pause_seconds=pause_seconds, stop_event=stop_event)
             log("Resuming.")
+            if abort_on_resume:
+                return
             for gx, gy in interpolate(resumed_at, target, RESUME_STEPS):
                 move_cursor(gx, gy)
                 time.sleep(STEP_DELAY)
@@ -740,20 +776,26 @@ def run_overlay(title, stop_event):
 
 
 def trace_until_done(args, name_path, deadline, stop_event):
-    """Keep tracing (cursive text, or the games in turn) until the deadline
-    passes or `stop_event` is set."""
+    """Keep tracing (cursive text, the games in turn, or --drift's crawl
+    to a corner) until the deadline passes or `stop_event` is set."""
     game_index = 0
+    abort_on_resume = args.drift
     while time.time() < deadline and not stop_event.is_set():
         prevent_sleep()  # re-affirmed each pass through the name in case anything clears it
+        if args.drift:
+            path, pen_down = build_drift_path(deadline)
         # re-randomizes placement each pass; cycles through the games in order otherwise
-        if name_path is not None:
+        elif name_path is not None:
             path, pen_down = build_screen_path(name_path)
         else:
             path, pen_down = build_screen_path(GAME_BUILDERS[game_index % len(GAME_BUILDERS)]())
             game_index += 1
         if _draw_queue is not None:
             _draw_queue.put(("path", path, pen_down))
-        move_along_path(path, pause_seconds=args.resume_delay, deadline=deadline, stop_event=stop_event)
+        move_along_path(
+            path, pause_seconds=args.resume_delay, deadline=deadline, stop_event=stop_event,
+            abort_on_resume=abort_on_resume,
+        )
     if not stop_event.is_set():
         print(f"\nTimeout of {args.timeout} hour(s) reached. Stopping.")
 
@@ -781,12 +823,18 @@ def parse_args():
         "--show", action=argparse.BooleanOptionalAction, default=True,
         help="open a window that draws the trace as the cursor moves (requires pygame-ce); use --no-show to disable",
     )
+    parser.add_argument(
+        "--drift", action="store_true",
+        help="slowly crawl the cursor to the screen's bottom-left corner and hold there, "
+             "instead of playing games or tracing cursive text; implies --no-show and "
+             "ignores -s/--spell",
+    )
     return parser.parse_args()
 
 
 def main():
     args = parse_args()
-    show = args.show
+    show = args.show and not args.drift
     show_fallback = False
     if show:
         try:
@@ -794,13 +842,15 @@ def main():
         except ImportError:
             show = False
             show_fallback = True
-    cursive_mode = args.spell is not None
+    cursive_mode = args.spell is not None and not args.drift
     doodle_fallback = cursive_mode and not HERSHEY_AVAILABLE
     name_path = build_name_path(args.spell) if cursive_mode else None
     deadline = time.time() + args.timeout * 3600
 
     print(f"Hancock {__version__}")
-    if show_fallback:
+    if args.drift:
+        print("Slowly crawling the mouse to the bottom-left corner to keep the machine awake.")
+    elif show_fallback:
         print(
             "pygame-ce isn't installed, so running without the --show window. "
             "Install it with:\n    pip install pygame-ce"
@@ -813,7 +863,7 @@ def main():
         )
     elif cursive_mode:
         print(f"Moving the mouse in a slow cursive trace of {args.spell!r} to keep the machine awake.")
-    else:
+    elif not args.drift:
         print("Playing tic-tac-toe, Connect Four, Pong, Snowman, and a maze solve to keep the machine awake.")
     print(f"Moving the mouse or typing will pause tracing until you've stopped for {args.resume_delay}s.")
     print(f"Will stop automatically after {args.timeout} hour(s), or press Ctrl+C to stop sooner.")

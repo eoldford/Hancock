@@ -103,17 +103,17 @@ source .venv/bin/activate      # macOS
 
 1. **Get Hancock**
 
-   Option A — clone the repo:
+   Option A — just grab `Hancock.py` with `curl` (built into Windows 10/11):
+
+   ```bash
+   curl -o Hancock.py https://raw.githubusercontent.com/eoldford/Hancock/main/Hancock.py
+   ```
+
+   Option B — clone the repo:
 
    ```bash
    git clone https://github.com/eoldford/Hancock.git
    cd Hancock
-   ```
-
-   Option B — just grab `Hancock.py` with `curl` (built into Windows 10/11):
-
-   ```bash
-   curl -o Hancock.py https://raw.githubusercontent.com/eoldford/Hancock/main/Hancock.py
    ```
 
    Option C — download it in a browser: open
@@ -141,6 +141,7 @@ maze solve, each playing out a scripted game against itself. Options:
 | `-r`, `--resume-delay` | Seconds of no mouse movement or keystrokes before resuming after you interrupt it | `60.0` |
 | `-t`, `--timeout` | Stop automatically after this many hours | `2.0` |
 | `--show` / `--no-show` | Window that draws the trace as the cursor moves | on |
+| `--drift` | Slowly crawl the cursor to the screen's bottom-left corner and hold there, instead of playing games or tracing cursive text; implies `--no-show` and ignores `-s`/`--spell` | off |
 | `--version` | Print the version and exit | |
 
 Examples:
@@ -152,6 +153,7 @@ python Hancock.py -s "Evan P Oldford" -r 5
 python Hancock.py -t 12
 python Hancock.py --no-show
 python Hancock.py -s "Evan P Oldford" --no-show
+python Hancock.py --drift
 ```
 
 ## Behavior
@@ -174,6 +176,14 @@ python Hancock.py -s "Evan P Oldford" --no-show
 - **Self-limiting.** Stops on its own after `--timeout` hours, or
   immediately on Ctrl+C. Either way it releases the sleep-prevention
   request on exit.
+- **Drift mode.** `--drift` skips games/cursive text entirely and instead
+  crawls the cursor in a straight line to the screen's bottom-left corner,
+  paced to arrive exactly when `--timeout` runs out (so with the 2-hour
+  default, it's very slow), holding there once it arrives (still checking
+  for manual activity, same as any other mode). If you move the mouse
+  yourself mid-drift, the next pass picks up from wherever you left it and
+  re-paces to the same deadline, rather than gliding back to the old line.
+  Implies `--no-show`.
 
 ## How the games are built
 
