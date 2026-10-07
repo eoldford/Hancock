@@ -106,7 +106,8 @@ source .venv/bin/activate      # macOS
    Option A — clone the repo:
 
    ```bash
-   git clone https://github.com/eoldford/Hancock.git && cd Hancock
+   git clone https://github.com/eoldford/Hancock.git
+   cd Hancock
    ```
 
    Option B — just grab `Hancock.py` with `curl` (built into Windows 10/11):
